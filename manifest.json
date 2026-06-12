@@ -1,0 +1,179 @@
+{
+  "id": "skintokens-process-extension",
+  "name": "SkinTokens Process Extension",
+  "type": "process",
+  "entry": "processor.py",
+  "version": "0.1.0",
+  "author": "DrHepa",
+  "description": "Modly process wrapper for SkinTokens/TokenRig mesh auto-rigging with JSONL setup/runtime progress.",
+  "source": "https://github.com/VAST-AI-Research/SkinTokens",
+  "metadata": {
+    "resolution": "planned",
+    "implementation_profile": "process-extension-with-custom-python-setup",
+    "setup_contract": "python-root-setup-py-json-observable",
+    "support_state": "unvalidated-planning",
+    "surface_owner": "electron-install-and-live-process; extension-owned-runtime",
+    "headless_eligible": false,
+    "linux_arm64_risk": "high",
+    "upstream_repo": "VAST-AI-Research/SkinTokens",
+    "hf_repo": "VAST-AI/SkinTokens",
+    "weight_owner_id": "VAST-AI/SkinTokens",
+    "download_check": "experiments/articulation_xl_quantization_256_token_4/grpo_1400.ckpt",
+    "logical_model_root": "models/skintokens-process-extension/tokenrig",
+    "required_vram_gb": 14,
+    "runtime_stages": [
+      "validate-input",
+      "readiness",
+      "bpy-server",
+      "load-model",
+      "prepare-mesh",
+      "encode-mesh",
+      "generate-tokens",
+      "decode-skin",
+      "postprocess",
+      "export-glb",
+      "validate-output"
+    ]
+  },
+  "asset_requirements": {
+    "strategy": "sentinel-files",
+    "required": [
+      "models/skintokens-process-extension/tokenrig/experiments/articulation_xl_quantization_256_token_4/grpo_1400.ckpt",
+      "models/skintokens-process-extension/tokenrig/experiments/skin_vae_2_10_32768/last.ckpt",
+      "models/skintokens-process-extension/tokenrig/models/Qwen3-0.6B/config.json"
+    ],
+    "model_assets": [
+      {
+        "id": "tokenrig-grpo",
+        "repo": "VAST-AI/SkinTokens",
+        "path": "models/skintokens-process-extension/tokenrig/experiments/articulation_xl_quantization_256_token_4/grpo_1400.ckpt",
+        "size_bytes": 1131603979,
+        "sha256": "f4e4706a11cfb520cdde65156a0358545e4fbf8f36237aca01ea5e79d5cb5692"
+      },
+      {
+        "id": "skintokens-vae",
+        "repo": "VAST-AI/SkinTokens",
+        "path": "models/skintokens-process-extension/tokenrig/experiments/skin_vae_2_10_32768/last.ckpt",
+        "size_bytes": 487311745,
+        "sha256": "4843f49e58afff88345806b94ca82e6cc9d8def6e7432e2853c677b154de0ed4"
+      },
+      {
+        "id": "qwen3-config",
+        "repo": "Qwen/Qwen3-0.6B",
+        "path": "models/skintokens-process-extension/tokenrig/models/Qwen3-0.6B/config.json",
+        "config_only": true
+      }
+    ]
+  },
+  "assets": {
+    "extension_root": "extensions/skintokens-process-extension",
+    "model_roots": [
+      "models/skintokens-process-extension/tokenrig"
+    ]
+  },
+  "entrypoints": {
+    "setup": "setup.py",
+    "process": "processor.py"
+  },
+  "setup": {
+    "entrypoint": "setup.py",
+    "venv_dir": "venv",
+    "default_downloads": true,
+    "default_installs": true,
+    "source_ref": "main",
+    "model_root": "models/skintokens-process-extension/tokenrig"
+  },
+  "nodes": [
+    {
+      "id": "rig-mesh",
+      "name": "Rig Mesh with SkinTokens",
+      "type": "process",
+      "input": "mesh",
+      "output": "mesh",
+      "description": "Generates a rigged GLB from an input OBJ/FBX/GLB using SkinTokens/TokenRig.",
+      "params_schema": [
+        {
+          "id": "top_k",
+          "label": "Top K",
+          "type": "int",
+          "default": 5,
+          "min": 1,
+          "max": 200,
+          "tooltip": "Top-k sampling for TokenRig autoregressive generation."
+        },
+        {
+          "id": "top_p",
+          "label": "Top P",
+          "type": "float",
+          "default": 0.95,
+          "min": 0.1,
+          "max": 1.0,
+          "step": 0.01,
+          "tooltip": "Nucleus sampling threshold."
+        },
+        {
+          "id": "temperature",
+          "label": "Temperature",
+          "type": "float",
+          "default": 1.0,
+          "min": 0.1,
+          "max": 2.0,
+          "step": 0.1,
+          "tooltip": "Sampling temperature."
+        },
+        {
+          "id": "repetition_penalty",
+          "label": "Repetition Penalty",
+          "type": "float",
+          "default": 2.0,
+          "min": 0.5,
+          "max": 3.0,
+          "step": 0.1,
+          "tooltip": "Penalty for repeated output tokens."
+        },
+        {
+          "id": "num_beams",
+          "label": "Beams",
+          "type": "int",
+          "default": 10,
+          "min": 1,
+          "max": 20,
+          "tooltip": "Beam count used by upstream generation."
+        },
+        {
+          "id": "use_skeleton",
+          "label": "Use Existing Skeleton",
+          "type": "select",
+          "default": "false",
+          "options": [
+            { "value": "false", "label": "No" },
+            { "value": "true", "label": "Yes" }
+          ],
+          "tooltip": "When true, SkinTokens skins an input mesh that already includes a skeleton."
+        },
+        {
+          "id": "use_transfer",
+          "label": "Transfer Original Texture/Scale",
+          "type": "select",
+          "default": "true",
+          "options": [
+            { "value": "false", "label": "No" },
+            { "value": "true", "label": "Yes" }
+          ],
+          "tooltip": "Uses upstream transfer export path to preserve texture and scale when possible."
+        },
+        {
+          "id": "use_postprocess",
+          "label": "Voxel Skin Postprocess",
+          "type": "select",
+          "default": "false",
+          "options": [
+            { "value": "false", "label": "No" },
+            { "value": "true", "label": "Yes" }
+          ],
+          "tooltip": "Applies upstream voxel-based skin postprocess. Slower and experimental."
+        }
+      ]
+    }
+  ]
+}
