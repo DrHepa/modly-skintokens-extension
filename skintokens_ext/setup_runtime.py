@@ -662,6 +662,23 @@ sys.exit(1 if failed else 0)
     return payload
 
 
+def _run_pip_check(venv_python: Path, runner: Runner, *, bpy_provider: dict[str, Any], writer: EventWriter) -> dict[str, Any]:
+    result = runner.run([str(venv_python), "-m", "pip", "check"])
+    _emit_command_tail(writer, result, stage="pip-check")
+    if result.ok:
+        return {"status": "ok", "result": asdict(result), "warnings": []}
+
+    combined = "\n".join([result.stdout_tail, result.stderr_tail])
+    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    bpy_unsupported = [line for line in lines if line.lower().startswith("bpy ") and " is not supported on this platform" in line.lower()]
+    non_bpy_lines = [line for line in lines if line not in bpy_unsupported]
+    if bpy_provider.get("status") == "ok" and bpy_unsupported and not non_bpy_lines:
+        writer.log("pip check reported bpy as unsupported, but the selected bpy provider import probe passed; continuing with warning.", "pip-check")
+        return {"status": "warning", "result": asdict(result), "warnings": bpy_unsupported}
+
+    raise SetupError("Setup command failed at pip-check.", code="pip-check-failed", stage="pip-check", detail=asdict(result))
+
+
 def _write_failed_state(*, layout: ModlyLayout, error: SetupError, installs_started: bool, downloads_started: bool) -> Path:
     state = planned_state(status="failed", dry_run=False, layout=layout)
     state.update(
@@ -793,7 +810,7 @@ def run_setup(
 
         if not skip_install:
             writer.progress(90, "Running pip check", "pip-check")
-            summary["commands"]["pip-check"] = asdict(_run_checked(runner, [str(venv_python), "-m", "pip", "check"], stage="pip-check", writer=writer))
+            summary["commands"]["pip-check"] = _run_pip_check(venv_python, runner, bpy_provider=summary["bpy_provider"], writer=writer)
             writer.progress(95, "Running import probes", "import-probes")
             summary["probes"] = _run_import_probes(venv_python, runner, bpy_provider=summary["bpy_provider"], writer=writer)
 

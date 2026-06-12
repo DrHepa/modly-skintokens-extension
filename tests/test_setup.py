@@ -291,6 +291,55 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(install["mode"], "managed-wheel")
             self.assertEqual(install["managed"]["wheel"]["id"], "windows-test")
 
+    def test_pip_check_bpy_unsupported_is_warning_when_bpy_probe_passed(self) -> None:
+        class BpyPipCheckRunner:
+            def __init__(self):
+                self.commands = []
+
+            def run(self, args, *, cwd=None, env=None):
+                args = list(args)
+                self.commands.append(args)
+                if args[-2:] == ["pip", "check"] or ("pip" in args and "check" in args):
+                    return CommandResult(args=args, returncode=1, stdout_tail="bpy 5.0.1 is not supported on this platform\n", stderr_tail="", ok=False)
+                if "-c" in args:
+                    probes = {
+                        "torch": {"status": "ok"},
+                        "flash_attn": {"status": "ok"},
+                        "fast_simplification": {"status": "ok"},
+                        "torch_cuda": {"status": "ok"},
+                    }
+                    return CommandResult(args=args, returncode=0, stdout_tail=json.dumps(probes) + "\n", stderr_tail="", ok=True)
+                return CommandResult(args=args, returncode=0, stdout_tail="ok\n", stderr_tail="", ok=True)
+
+        with TemporaryDirectory() as tmp:
+            modly_home = Path(tmp) / "Modly"
+            ext_dir = modly_home / "extensions" / "skintokens-process-extension"
+            ext_dir.mkdir(parents=True)
+            wheelhouse = ext_dir / ".skintokens-runtime" / "wheelhouse" / "flash-attn"
+            wheelhouse.mkdir(parents=True)
+            (wheelhouse / "flash_attn-2.8.3-cp311-cp311-win_amd64.whl").write_bytes(b"fake-wheel")
+            stream = StringIO()
+            with mock.patch("skintokens_ext.setup_runtime._create_venv", return_value={"status": "created", "venv_python": str(ext_dir / "venv" / "Scripts" / "python.exe")}), \
+                mock.patch("skintokens_ext.setup_runtime._resolve_bpy_provider", return_value={"kind": "python-bpy", "status": "ok", "probe": {"status": "ok"}}), \
+                mock.patch("skintokens_ext.setup_runtime._download_upstream_source", return_value={"status": "downloaded"}), \
+                mock.patch("skintokens_ext.setup_runtime._sync_runtime_resources", return_value={"status": "synced", "resources": []}), \
+                mock.patch("skintokens_ext.setup_runtime._verify_model_assets", return_value={"tokenrig-grpo": {"status": "ok"}, "skintokens-vae": {"status": "ok"}, "qwen3-config": {"status": "ok"}}):
+                code = run_setup(
+                    dry_run=False,
+                    payload={"ext_dir": str(ext_dir), "python_exe": sys.executable},
+                    skip_download=True,
+                    writer=EventWriter(stream),
+                    runner=BpyPipCheckRunner(),
+                )
+
+            self.assertEqual(code, 0, stream.getvalue())
+            events = [json.loads(line) for line in stream.getvalue().splitlines()]
+            self.assertTrue(any("continuing with warning" in event.get("message", "") for event in events))
+            state = json.loads(Path(events[-1]["statePath"]).read_text(encoding="utf-8"))
+            pip_check = state["setup_summary"]["commands"]["pip-check"]
+            self.assertEqual(pip_check["status"], "warning")
+            self.assertEqual(pip_check["warnings"], ["bpy 5.0.1 is not supported on this platform"])
+
     def test_build_flash_attn_wheel_command_writes_local_wheel(self) -> None:
         class WheelBuildRunner:
             def __init__(self, wheelhouse: Path):
