@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
-from skintokens_ext.runtime import FakeBackend, normalize_params, run_pipeline
+from skintokens_ext.runtime import FakeBackend, PipelineError, _runtime_gpu_requirement_guard, normalize_params, run_pipeline
 from tests.helpers import write_minimal_glb
 
 
@@ -51,6 +53,30 @@ class RuntimeTests(unittest.TestCase):
                 backend=FakeBackend(),
             )
             self.assertEqual(result.file_path.parent, workflows_dir)
+
+    def test_runtime_gpu_guard_rejects_pre_ampere(self) -> None:
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                is_available=lambda: True,
+                get_device_capability=lambda: (7, 5),
+                get_device_name=lambda: "RTX 20xx",
+            )
+        )
+        with mock.patch.dict("sys.modules", {"torch": fake_torch}):
+            with self.assertRaises(PipelineError) as raised:
+                _runtime_gpu_requirement_guard()
+        self.assertEqual(raised.exception.code, "gpu-too-old")
+
+    def test_runtime_gpu_guard_allows_ampere(self) -> None:
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                is_available=lambda: True,
+                get_device_capability=lambda: (8, 0),
+                get_device_name=lambda: "RTX 30xx",
+            )
+        )
+        with mock.patch.dict("sys.modules", {"torch": fake_torch}):
+            _runtime_gpu_requirement_guard()
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ from .readiness import (
 TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 TORCH_PACKAGES = ["torch==2.7.0", "torchvision==0.22.0", "torchaudio==2.7.0"]
 PIP_FLAGS = ["--no-cache-dir", "--retries", "5", "--timeout", "60"]
+MIN_FLASH_ATTN_SM = 80
 GENERIC_REQUIREMENTS = [
     "transformers>=4.57.0",
     "diffusers>=0.35.0",
@@ -163,6 +164,45 @@ def _payload_value(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload and payload[key] not in (None, ""):
             return payload[key]
     return None
+
+
+def _normalize_gpu_sm(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        text = str(value).strip().lower().replace("sm_", "").replace("sm", "")
+        if "." in text:
+            major, minor = text.split(".", 1)
+            return int(major) * 10 + int(minor[:1] or "0")
+        number = int(text)
+        if number < 10:
+            return number * 10
+        return number
+    except (TypeError, ValueError):
+        return None
+
+
+def _gpu_requirement_message(sm: int | None) -> str:
+    detected = f"sm_{sm}" if sm is not None else "unknown"
+    return (
+        "SkinTokens requires an NVIDIA Ampere / RTX 30-series or newer GPU because "
+        "the current upstream runtime requires FlashAttention. "
+        f"Detected GPU capability: {detected}."
+    )
+
+
+def _preflight_gpu_requirement(payload: dict[str, Any], writer: EventWriter) -> dict[str, Any]:
+    raw = _payload_value(payload, "gpu_sm", "gpuSm", "sm", "compute_capability", "computeCapability")
+    sm = _normalize_gpu_sm(raw)
+    if sm is None:
+        writer.log("GPU capability was not provided by Modly; runtime will verify Ampere+ before generation.", "gpu-preflight")
+        return {"status": "unknown", "minimum_sm": MIN_FLASH_ATTN_SM, "raw": raw}
+    if sm < MIN_FLASH_ATTN_SM:
+        raise SetupError(_gpu_requirement_message(sm), code="gpu-too-old", stage="gpu-preflight", detail={"gpu_sm": sm, "minimum_sm": MIN_FLASH_ATTN_SM})
+    writer.log(f"GPU capability preflight passed: sm_{sm}", "gpu-preflight")
+    return {"status": "ok", "gpu_sm": sm, "minimum_sm": MIN_FLASH_ATTN_SM}
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -750,6 +790,20 @@ def run_setup(
     writer.log(f"Extension directory: {layout.ext_dir}", "setup-start")
     writer.log(f"Model root: {model_root_for_layout(layout)}", "setup-start")
 
+    installs_started = False
+    downloads_started = False
+    try:
+        if execute_real and not dry_run:
+            writer.progress(3, "Checking GPU compatibility", "gpu-preflight")
+            preflight = _preflight_gpu_requirement(payload, writer)
+        else:
+            preflight = {"status": "not-run", "minimum_sm": MIN_FLASH_ATTN_SM}
+    except SetupError as exc:
+        path = _write_failed_state(layout=layout, error=exc, installs_started=installs_started, downloads_started=downloads_started)
+        writer.error(str(exc), code=exc.code, stage=exc.stage)
+        writer.send({"type": "setup_done", "status": "failed", "failure_code": exc.code, "statePath": str(path), "resolved_paths": layout.as_dict()})
+        return 1
+
     if dry_run or not execute_real:
         for index, action in enumerate(actions, start=1):
             percent = min(95, 5 + int(index / len(actions) * 85))
@@ -758,6 +812,7 @@ def run_setup(
                 writer.log("planned command: " + " ".join(action.command), action.id)
         state = planned_state(status="dry_run", dry_run=True, layout=layout)
         state["planned_actions"] = [asdict(action) for action in actions]
+        state["gpu_preflight"] = preflight
         state["probes"] = {name: {"status": "planned"} for name in NATIVE_PROBES}
         state["downloads"] = {item["id"]: {"status": "planned", "logical_path": item.get("logical_path"), "path": item["path"]} for item in MODEL_SENTINELS}
         path = write_state_for_layout(state, layout)
@@ -765,10 +820,9 @@ def run_setup(
         writer.send({"type": "setup_done", "status": "dry_run", "statePath": str(path), "resolved_paths": layout.as_dict()})
         return 0
 
-    installs_started = False
-    downloads_started = False
     summary: dict[str, Any] = {"resolved_paths": layout.as_dict(), "source_ref": source_ref, "commands": {}}
     try:
+        summary["gpu_preflight"] = preflight
         writer.progress(5, "Creating extension virtual environment", "create-venv")
         summary["venv"] = _create_venv(venv_dir, base_python=base_python, runner=runner, writer=writer)
 

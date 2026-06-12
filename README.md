@@ -18,6 +18,7 @@ Known upstream requirements from public SkinTokens evidence:
 
 - Python >= 3.11
 - NVIDIA GPU with at least 14 GB VRAM
+- NVIDIA Ampere / RTX 30-series or newer is required by the current extension runtime. RTX 20-series, GTX, and older GPUs are not supported because upstream SkinTokens uses FlashAttention in TokenRig and SkinVAE paths.
 - CUDA >= 12.1
 - recommended PyTorch lane: `torch==2.7.0`, `torchvision==0.22.0`, `torchaudio==2.7.0` from `cu128`
 - native/hard dependencies include `flash-attn`, `bpy>=4.2`, `open3d`, and `fast-simplification`
@@ -81,6 +82,7 @@ models/skintokens-process-extension/tokenrig/
 
 Setup actions:
 
+- preflight GPU capability when Modly passes `gpu_sm`; fail before heavy downloads/installs if the GPU is older than Ampere (`sm_80`);
 - create extension-owned venv;
 - install exact torch/cu128 lane;
 - install generic requirements;

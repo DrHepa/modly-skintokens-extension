@@ -44,6 +44,9 @@ class PipelineError(RuntimeError):
         self.stage = stage
 
 
+MIN_FLASH_ATTN_SM = 80
+
+
 @dataclass(frozen=True)
 class RuntimeParams:
     top_k: int = 5
@@ -122,6 +125,7 @@ def run_pipeline(
 
     backend = backend or _select_backend()
     if backend.requires_readiness:
+        _runtime_gpu_requirement_guard()
         progress(10, "Checking SkinTokens runtime assets", "readiness")
         readiness = check_ready_for_layout(layout)
         if not readiness.ready:
@@ -150,6 +154,33 @@ def _select_backend() -> Backend:
     if os.environ.get("MODLY_SKINTOKENS_FAKE_RUNTIME") == "1":
         return FakeBackend()
     return SkinTokensBackend()
+
+
+def _runtime_gpu_requirement_guard() -> None:
+    try:
+        import torch
+    except Exception as exc:
+        raise PipelineError("SkinTokens requires PyTorch with CUDA support before generation.", code="torch-unavailable", stage="gpu-preflight") from exc
+    if not torch.cuda.is_available():
+        raise PipelineError("SkinTokens requires an NVIDIA CUDA GPU. CUDA is not available.", code="cuda-unavailable", stage="gpu-preflight")
+    try:
+        major, minor = torch.cuda.get_device_capability()
+    except Exception as exc:
+        raise PipelineError("Unable to detect CUDA GPU compute capability for SkinTokens.", code="gpu-detect-failed", stage="gpu-preflight") from exc
+    sm = major * 10 + minor
+    if sm < MIN_FLASH_ATTN_SM:
+        name = ""
+        try:
+            name = torch.cuda.get_device_name()
+        except Exception:
+            pass
+        suffix = f" Detected GPU: {name}." if name else ""
+        raise PipelineError(
+            "SkinTokens requires an NVIDIA Ampere / RTX 30-series or newer GPU because the current upstream runtime requires FlashAttention. "
+            f"Detected GPU capability: sm_{sm}.{suffix}",
+            code="gpu-too-old",
+            stage="gpu-preflight",
+        )
 
 
 class FakeBackend:

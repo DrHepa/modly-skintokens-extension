@@ -81,6 +81,48 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(state["status"], "ready")
             self.assertEqual(Path(state["model_root"]), (modly_home / "models" / "skintokens-process-extension" / "tokenrig").resolve())
             self.assertEqual(state["logical_model_root"], "models/skintokens-process-extension/tokenrig")
+            self.assertEqual(state["setup_summary"]["gpu_preflight"]["status"], "unknown")
+
+    def test_setup_preflight_rejects_pre_ampere_gpu(self) -> None:
+        with TemporaryDirectory() as tmp:
+            modly_home = Path(tmp) / "Modly"
+            ext_dir = modly_home / "extensions" / "skintokens-process-extension"
+            ext_dir.mkdir(parents=True)
+            stream = StringIO()
+            code = run_setup(
+                dry_run=False,
+                payload={"ext_dir": str(ext_dir), "python_exe": sys.executable, "gpu_sm": 75},
+                writer=EventWriter(stream),
+            )
+
+            self.assertEqual(code, 1)
+            events = [json.loads(line) for line in stream.getvalue().splitlines()]
+            self.assertTrue(any(event.get("type") == "error" and event.get("code") == "gpu-too-old" for event in events))
+            self.assertEqual(events[-1]["failure_code"], "gpu-too-old")
+
+    def test_setup_preflight_allows_ampere_gpu(self) -> None:
+        with TemporaryDirectory() as tmp:
+            modly_home = Path(tmp) / "Modly"
+            ext_dir = modly_home / "extensions" / "skintokens-process-extension"
+            ext_dir.mkdir(parents=True)
+            stream = StringIO()
+            with mock.patch("skintokens_ext.setup_runtime._create_venv", return_value={"status": "created", "venv_python": str(ext_dir / "venv" / "bin" / "python")}), \
+                mock.patch("skintokens_ext.setup_runtime._download_upstream_source", return_value={"status": "downloaded"}), \
+                mock.patch("skintokens_ext.setup_runtime._sync_runtime_resources", return_value={"status": "synced", "resources": []}), \
+                mock.patch("skintokens_ext.setup_runtime._verify_model_assets", return_value={"tokenrig-grpo": {"status": "ok"}, "skintokens-vae": {"status": "ok"}, "qwen3-config": {"status": "ok"}}):
+                code = run_setup(
+                    dry_run=False,
+                    payload={"ext_dir": str(ext_dir), "python_exe": sys.executable, "gpu_sm": 80},
+                    skip_install=True,
+                    skip_download=True,
+                    writer=EventWriter(stream),
+                )
+
+            self.assertEqual(code, 0, stream.getvalue())
+            events = [json.loads(line) for line in stream.getvalue().splitlines()]
+            state = json.loads(Path(events[-1]["statePath"]).read_text(encoding="utf-8"))
+            self.assertEqual(state["setup_summary"]["gpu_preflight"]["status"], "ok")
+            self.assertEqual(state["setup_summary"]["gpu_preflight"]["gpu_sm"], 80)
 
     def test_failed_install_command_emits_stderr_tail_log(self) -> None:
         class FailingRunner:
