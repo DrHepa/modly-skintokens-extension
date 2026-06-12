@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import unittest
@@ -221,6 +222,74 @@ class SetupTests(unittest.TestCase):
             events = [json.loads(line) for line in stream.getvalue().splitlines()]
             self.assertTrue(any(event.get("type") == "error" and event.get("code") == "flash-attn-wheel-unavailable" for event in events))
             self.assertEqual(events[-1]["failure_code"], "flash-attn-wheel-unavailable")
+
+    def test_windows_cp311_setup_downloads_managed_flash_attn_wheel(self) -> None:
+        class RecordingRunner:
+            def __init__(self):
+                self.commands = []
+
+            def run(self, args, *, cwd=None, env=None):
+                args = list(args)
+                self.commands.append(args)
+                if "-c" in args:
+                    probes = {
+                        "torch": {"status": "ok"},
+                        "flash_attn": {"status": "ok"},
+                        "fast_simplification": {"status": "ok"},
+                        "torch_cuda": {"status": "ok"},
+                    }
+                    return CommandResult(args=args, returncode=0, stdout_tail=json.dumps(probes) + "\n", stderr_tail="", ok=True)
+                return CommandResult(args=args, returncode=0, stdout_tail="ok\n", stderr_tail="", ok=True)
+
+        with TemporaryDirectory() as tmp:
+            modly_home = Path(tmp) / "Modly"
+            ext_dir = modly_home / "extensions" / "skintokens-process-extension"
+            ext_dir.mkdir(parents=True)
+            content = b"managed-wheel"
+            digest = hashlib.sha256(content).hexdigest()
+            managed = [{
+                "id": "windows-test",
+                "python_tag": "cp311",
+                "abi_tag": "cp311",
+                "platform_tag": "win_amd64",
+                "filename": "flash_attn-2.8.3+cu128torch2.7-cp311-cp311-win_amd64.whl",
+                "url": "https://example.invalid/flash_attn.whl",
+                "sha256": digest,
+                "size_bytes": len(content),
+            }]
+
+            def fake_urlretrieve(url, destination):
+                Path(destination).write_bytes(content)
+                return (destination, None)
+
+            runner = RecordingRunner()
+            stream = StringIO()
+            with mock.patch("skintokens_ext.setup_runtime._create_venv", return_value={"status": "created", "venv_python": str(ext_dir / "venv" / "Scripts" / "python.exe")}), \
+                mock.patch("skintokens_ext.setup_runtime._venv_python_tags", return_value={"python_tag": "cp311", "abi_tag": "cp311", "platform_tag": "win_amd64"}), \
+                mock.patch("skintokens_ext.setup_runtime.MANAGED_FLASH_ATTN_WHEELS", managed), \
+                mock.patch("skintokens_ext.setup_runtime.urllib.request.urlretrieve", side_effect=fake_urlretrieve), \
+                mock.patch("skintokens_ext.setup_runtime._resolve_bpy_provider", return_value={"kind": "python-bpy", "status": "ok"}), \
+                mock.patch("skintokens_ext.setup_runtime._download_upstream_source", return_value={"status": "downloaded"}), \
+                mock.patch("skintokens_ext.setup_runtime._sync_runtime_resources", return_value={"status": "synced", "resources": []}), \
+                mock.patch("skintokens_ext.setup_runtime._verify_model_assets", return_value={"tokenrig-grpo": {"status": "ok"}, "skintokens-vae": {"status": "ok"}, "qwen3-config": {"status": "ok"}}):
+                code = run_setup(
+                    dry_run=False,
+                    payload={"ext_dir": str(ext_dir), "python_exe": sys.executable},
+                    skip_download=True,
+                    writer=EventWriter(stream),
+                    runner=runner,
+                )
+
+            self.assertEqual(code, 0, stream.getvalue())
+            wheel = ext_dir / ".skintokens-runtime" / "wheelhouse" / "flash-attn" / managed[0]["filename"]
+            self.assertTrue(wheel.exists())
+            self.assertEqual(wheel.read_bytes(), content)
+            events = [json.loads(line) for line in stream.getvalue().splitlines()]
+            self.assertTrue(any("Downloading managed flash-attn wheel" in event.get("message", "") for event in events))
+            state = json.loads(Path(events[-1]["statePath"]).read_text(encoding="utf-8"))
+            install = state["setup_summary"]["commands"]["install-flash-attn"]
+            self.assertEqual(install["mode"], "managed-wheel")
+            self.assertEqual(install["managed"]["wheel"]["id"], "windows-test")
 
     def test_build_flash_attn_wheel_command_writes_local_wheel(self) -> None:
         class WheelBuildRunner:

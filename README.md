@@ -87,6 +87,7 @@ Setup actions:
 - install flash-attn build prerequisites (`psutil`, `ninja`);
 - install/probe required native/runtime packages such as `flash-attn` and `fast-simplification`;
   - first install `flash-attn` from `.skintokens-runtime/wheelhouse/flash-attn` if a local wheel exists;
+  - on Windows `cp311/win_amd64`, download and verify the managed `flash-attn` `cu128/torch2.7` wheel from the same public CUDA wheel source used by the Pixal3D candidate;
   - otherwise try a binary-only pip install;
   - source-building `flash-attn` during normal setup is disabled by default to avoid unbounded user installs;
 - try optional `open3d` installation for voxel postprocess support; if unavailable, base rigging can still proceed but `use_postprocess=true` will fail with an explicit runtime error;

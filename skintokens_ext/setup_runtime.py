@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import urllib.request
 import venv
@@ -53,6 +54,18 @@ GENERIC_REQUIREMENTS = [
 BPy_PACKAGE = "bpy>=4.2"
 FLASH_ATTN_PACKAGE = "flash-attn"
 FLASH_ATTN_BUILD_REQUIREMENTS = ["psutil", "ninja"]
+MANAGED_FLASH_ATTN_WHEELS = [
+    {
+        "id": "windows-cp311-cu128-torch2.7",
+        "python_tag": "cp311",
+        "abi_tag": "cp311",
+        "platform_tag": "win_amd64",
+        "filename": "flash_attn-2.8.3+cu128torch2.7-cp311-cp311-win_amd64.whl",
+        "url": "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/flash_attn-latest/flash_attn-2.8.3%2Bcu128torch2.7-cp311-cp311-win_amd64.whl",
+        "sha256": "4e935a37ac8ef2dd71836d65bf560507617c316e176a068e5e1f4ea5248e0cde",
+        "size_bytes": 250850103,
+    },
+]
 OPTIONAL_REQUIREMENTS = ["open3d"]
 NATIVE_PROBES = {
     "torch": "torch",
@@ -376,6 +389,106 @@ def _local_flash_attn_wheels(layout: ModlyLayout) -> list[Path]:
     return sorted([*wheelhouse.glob("flash_attn-*.whl"), *wheelhouse.glob("flash-attn-*.whl")])
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _current_python_tags() -> dict[str, str]:
+    implementation = getattr(sys.implementation, "name", "")
+    if implementation != "cpython":
+        python_tag = f"py{sys.version_info.major}"
+    else:
+        python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    return {"python_tag": python_tag, "abi_tag": python_tag, "platform_tag": platform_tag}
+
+
+def _venv_python_tags(venv_python: Path, runner: Runner) -> dict[str, str]:
+    script = """
+import json, sys, sysconfig
+implementation = getattr(sys.implementation, 'name', '')
+if implementation != 'cpython':
+    python_tag = f'py{sys.version_info.major}'
+else:
+    python_tag = f'cp{sys.version_info.major}{sys.version_info.minor}'
+platform_tag = sysconfig.get_platform().replace('-', '_').replace('.', '_')
+print(json.dumps({'python_tag': python_tag, 'abi_tag': python_tag, 'platform_tag': platform_tag}, sort_keys=True))
+"""
+    result = runner.run([str(venv_python), "-c", script])
+    if result.ok:
+        try:
+            return json.loads(result.stdout_tail.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            pass
+    return _current_python_tags()
+
+
+def _managed_flash_attn_wheel_for_tags(tags: dict[str, str]) -> dict[str, Any] | None:
+    for wheel in MANAGED_FLASH_ATTN_WHEELS:
+        if all(tags.get(key) == wheel[key] for key in ["python_tag", "abi_tag", "platform_tag"]):
+            return wheel
+    return None
+
+
+def _download_managed_flash_attn_wheel(*, layout: ModlyLayout, venv_python: Path, runner: Runner, writer: EventWriter) -> dict[str, Any] | None:
+    tags = _venv_python_tags(venv_python, runner)
+    wheel = _managed_flash_attn_wheel_for_tags(tags)
+    if wheel is None:
+        writer.log(
+            "No managed flash-attn wheel is registered for "
+            f"{tags.get('python_tag')}-{tags.get('abi_tag')}-{tags.get('platform_tag')}.",
+            "install-flash-attn",
+        )
+        return None
+
+    wheelhouse = _flash_attn_wheelhouse(layout)
+    wheelhouse.mkdir(parents=True, exist_ok=True)
+    destination = wheelhouse / str(wheel["filename"])
+    if not destination.exists():
+        writer.log(f"Downloading managed flash-attn wheel: {wheel['id']}", "install-flash-attn")
+        urllib.request.urlretrieve(str(wheel["url"]), destination)
+    else:
+        writer.log(f"Using cached managed flash-attn wheel: {destination.name}", "install-flash-attn")
+
+    actual_size = destination.stat().st_size
+    actual_sha256 = _sha256_file(destination)
+    if actual_size != int(wheel["size_bytes"]) or actual_sha256 != wheel["sha256"]:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise SetupError(
+            "Managed flash-attn wheel checksum verification failed.",
+            code="flash-attn-managed-wheel-checksum",
+            stage="install-flash-attn",
+            detail={"wheel": wheel, "actual_size": actual_size, "actual_sha256": actual_sha256},
+        )
+    return {"status": "downloaded", "wheel": wheel, "path": str(destination), "tags": tags}
+
+
+def _install_flash_attn_from_wheelhouse(*, venv_python: Path, layout: ModlyLayout, runner: Runner, writer: EventWriter, mode: str, managed: dict[str, Any] | None = None) -> dict[str, Any]:
+    wheelhouse = _flash_attn_wheelhouse(layout)
+    wheels = _local_flash_attn_wheels(layout)
+    writer.log(f"Installing flash-attn from local wheelhouse: {wheelhouse}", "install-flash-attn")
+    command = [
+        str(venv_python),
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        "--no-index",
+        "--find-links",
+        str(wheelhouse),
+        FLASH_ATTN_PACKAGE,
+    ]
+    return {"mode": mode, "managed": managed, "wheelhouse": str(wheelhouse), "wheels": [path.name for path in wheels], "result": asdict(_run_checked(runner, command, stage="install-flash-attn", writer=writer))}
+
+
 def _install_flash_attn(
     *,
     venv_python: Path,
@@ -387,20 +500,11 @@ def _install_flash_attn(
     wheelhouse = _flash_attn_wheelhouse(layout)
     wheels = _local_flash_attn_wheels(layout)
     if wheels:
-        writer.log(f"Installing flash-attn from local wheelhouse: {wheelhouse}", "install-flash-attn")
-        command = [
-            str(venv_python),
-            "-m",
-            "pip",
-            "install",
-            "--force-reinstall",
-            "--no-deps",
-            "--no-index",
-            "--find-links",
-            str(wheelhouse),
-            FLASH_ATTN_PACKAGE,
-        ]
-        return {"mode": "local-wheelhouse", "wheelhouse": str(wheelhouse), "wheels": [path.name for path in wheels], "result": asdict(_run_checked(runner, command, stage="install-flash-attn", writer=writer))}
+        return _install_flash_attn_from_wheelhouse(venv_python=venv_python, layout=layout, runner=runner, writer=writer, mode="local-wheelhouse")
+
+    managed = _download_managed_flash_attn_wheel(layout=layout, venv_python=venv_python, runner=runner, writer=writer)
+    if managed is not None:
+        return _install_flash_attn_from_wheelhouse(venv_python=venv_python, layout=layout, runner=runner, writer=writer, mode="managed-wheel", managed=managed)
 
     writer.log("No local flash-attn wheel found; trying binary-only pip install before any source build.", "install-flash-attn")
     binary_command = [str(venv_python), "-m", "pip", "install", *PIP_FLAGS, "--only-binary", ":all:", FLASH_ATTN_PACKAGE]
