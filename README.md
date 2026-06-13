@@ -1,69 +1,48 @@
-# SkinTokens Process Extension for Modly
+# SkinTokens Modly Extension
 
-Process-extension wrapper for [VAST-AI SkinTokens](https://github.com/VAST-AI-Research/SkinTokens), planned for Modly mesh-to-rigged-GLB workflows.
+SkinTokens mesh auto-rigging extension for Modly. It wraps the upstream [VAST-AI SkinTokens](https://github.com/VAST-AI-Research/SkinTokens) / TokenRig runtime and exposes a Modly `process` node that converts an input mesh into a rigged `.glb` workflow output.
 
-This repository intentionally starts from the Modly contract first:
+This repository contains the Modly extension shell only: manifest, setup entrypoint, runtime adapter, readiness checks, and tests. SkinTokens model weights are not committed to this repository.
 
-- stdout from `processor.py` is JSONL-only for Modly UI consumption;
-- install/setup emits observable JSONL events;
-- runtime stages are mapped explicitly instead of hiding the upstream pipeline behind `demo.py`;
-- model assets live under an extension-owned runtime directory;
-- unsafe logical paths are rejected before setup/runtime use.
+## What this extension provides
 
-## Current status
+- **Install / Repair** through `setup.py` with JSONL progress events for the Modly UI.
+- A Modly `process` node named **Rig Mesh with SkinTokens**.
+- Deterministic SkinTokens source staging under the extension runtime directory.
+- SkinTokens checkpoints and required config files stored under Modly's normal `models/` storage.
+- Runtime progress stages for setup, readiness, SkinTokens inference, GLB export, and output validation.
+- Fail-closed GPU compatibility checks for the current FlashAttention-based upstream runtime.
 
-This repository contains the Modly process wrapper, observable setup contract, and lightweight test harness. It does **not** claim a validated SkinTokens runtime lane yet; real platform support must be proven with setup + generation evidence.
+## Requirements
 
-Known upstream requirements from public SkinTokens evidence:
+- Modly with GitHub/process extension support.
+- Python `>= 3.11` provided by the Modly setup payload.
+- NVIDIA CUDA GPU.
+- **NVIDIA Ampere / RTX 30-series or newer is required** (`sm_80+`). RTX 20-series, GTX, and older GPUs are not supported because upstream SkinTokens uses FlashAttention in the TokenRig and SkinVAE paths.
+- At least **14 GB VRAM** is recommended by the upstream runtime profile.
+- CUDA `>= 12.1`; this extension prepares the PyTorch `cu128` lane by default.
+- Internet access to download SkinTokens source/assets from GitHub and Hugging Face.
+- Compatible `flash-attn`, `bpy`/Blender, and native Python dependencies for the target platform.
 
-- Python >= 3.11
-- NVIDIA GPU with at least 14 GB VRAM
-- NVIDIA Ampere / RTX 30-series or newer is required by the current extension runtime. RTX 20-series, GTX, and older GPUs are not supported because upstream SkinTokens uses FlashAttention in TokenRig and SkinVAE paths.
-- CUDA >= 12.1
-- recommended PyTorch lane: `torch==2.7.0`, `torchvision==0.22.0`, `torchaudio==2.7.0` from `cu128`
-- native/hard dependencies include `flash-attn`, `bpy>=4.2`, `open3d`, and `fast-simplification`
-- public model repo: `VAST-AI/SkinTokens`
+If the host GPU is older than Ampere and Modly passes GPU metadata, setup fails early with `gpu-too-old` before heavy installs/downloads. If GPU metadata is not available during setup, runtime performs the same check before generation.
 
-## Process protocol
+## Install from Modly
 
-`processor.py` reads one JSON object line from stdin and writes one JSON object per stdout line:
+1. In Modly, install this repository from GitHub:
 
-```jsonl
-{"type":"progress","percent":5,"label":"Validating mesh input","stage":"validate-input"}
-{"type":"log","message":"SkinTokens runtime assets are ready","stage":"readiness"}
-{"type":"done","result":{"filePath":"/path/to/result.glb"}}
-```
+   ```text
+   https://github.com/DrHepa/modly-skintokens-extension
+   ```
 
-Errors are also JSONL:
+2. Let Modly run the extension setup/repair action.
+3. Wait until setup reports the runtime as ready.
+4. Load a supported mesh (`.obj`, `.fbx`, `.glb`, or `.gltf`) and run **Rig Mesh with SkinTokens**.
 
-```jsonl
-{"type":"error","message":"rig-mesh requires input.filePath.","code":"protocol"}
-```
+SkinTokens intentionally does **not** use Modly's generic node-level **Download** button. Setup owns the custom model layout because the runtime needs SkinTokens checkpoints, the Qwen config snapshot, and small upstream config resources in specific paths.
 
-## Runtime stages
+Do not validate Modly behavior by running setup from an arbitrary source checkout. The production path is Modly installing the extension into its `extensions/` directory and passing the setup payload.
 
-The wrapper maps SkinTokens execution to these UI-visible stages:
-
-1. `validate-input`
-2. `readiness`
-3. `bpy-server`
-4. `load-model`
-5. `prepare-mesh`
-6. `encode-mesh`
-7. `generate-tokens`
-8. `decode-skin`
-9. `postprocess`
-10. `export-glb`
-11. `validate-output`
-
-The unit-test backend exercises this contract without importing SkinTokens, torch, bpy, or CUDA packages.
-
-## Setup
-
-`setup.py` supports two modes:
-
-- `python3 setup.py --dry-run` — emits setup events and writes a dry-run readiness state without installing/downloading anything.
-- Modly Install GitHub / `python3 setup.py '<payload-json>'` — performs real setup when Modly passes a payload such as `ext_dir` and `python_exe`.
+## What setup does
 
 Real setup prepares both the extension runtime and Modly model assets:
 
@@ -72,90 +51,141 @@ extensions/skintokens-process-extension/
 ├── venv/
 └── .skintokens-runtime/
     ├── bootstrap_state.json
-    └── vendor/skintokens/          # upstream SkinTokens source snapshot
+    ├── vendor/skintokens/              # staged upstream SkinTokens source
+    └── wheelhouse/flash-attn/          # optional local/managed flash-attn wheels
 
 models/skintokens-process-extension/tokenrig/
+├── configs/                            # synced upstream runtime configs
 ├── experiments/articulation_xl_quantization_256_token_4/grpo_1400.ckpt
 ├── experiments/skin_vae_2_10_32768/last.ckpt
-└── models/Qwen3-0.6B/config.json   # Qwen config/non-weight files only
+└── models/Qwen3-0.6B/config.json       # Qwen config/non-weight files only
 ```
 
 Setup actions:
 
-- preflight GPU capability when Modly passes `gpu_sm`; fail before heavy downloads/installs if the GPU is older than Ampere (`sm_80`);
-- create extension-owned venv;
-- install exact torch/cu128 lane;
-- install generic requirements;
-- install flash-attn build prerequisites (`psutil`, `ninja`);
-- install/probe required native/runtime packages such as `flash-attn` and `fast-simplification`;
-  - first install `flash-attn` from `.skintokens-runtime/wheelhouse/flash-attn` if a local wheel exists;
-  - on Windows `cp311/win_amd64`, download and verify the managed `flash-attn` `cu128/torch2.7` wheel from the same public CUDA wheel source used by the Pixal3D candidate;
-  - otherwise try a binary-only pip install;
-  - source-building `flash-attn` during normal setup is disabled by default to avoid unbounded user installs;
-- try optional `open3d` installation for voxel postprocess support; if unavailable, base rigging can still proceed but `use_postprocess=true` will fail with an explicit runtime error;
-- resolve the `bpy` provider:
-  - first try `pip install bpy>=4.2` in the extension venv;
-  - if that fails, probe a Blender executable from `blender_exe`, `MODLY_SKINTOKENS_BLENDER_EXE`, or `PATH` and record it as an `external-blender` fallback;
-- download the upstream SkinTokens source snapshot;
-- sync small upstream runtime resources such as `configs/` into the Modly model root because upstream resolves them relative to the runtime cwd;
-- download HF sentinels from `VAST-AI/SkinTokens` into Modly `models/skintokens-process-extension/tokenrig`;
-- download Qwen3-0.6B config only;
-- run `pip check` and import probes;
-- write `.skintokens-runtime/bootstrap_state.json`.
+- checks GPU capability when Modly provides `gpu_sm` / compute-capability metadata;
+- creates an extension-owned virtual environment;
+- installs `torch==2.7.0`, `torchvision==0.22.0`, and `torchaudio==2.7.0` from the `cu128` PyTorch lane;
+- installs generic SkinTokens runtime dependencies;
+- installs and probes required native packages such as `flash-attn` and `fast-simplification`;
+- probes optional `open3d` availability for future voxel postprocess support;
+- resolves the Blender bridge through either PyPI `bpy` or an external Blender executable;
+- downloads/stages the upstream SkinTokens source snapshot;
+- syncs required upstream runtime resources such as `configs/` into the model root;
+- downloads and verifies Hugging Face sentinel assets;
+- runs `pip check` and import probes;
+- writes `.skintokens-runtime/bootstrap_state.json`.
 
-The process node intentionally does **not** declare node-level `hf_repo`. SkinTokens uses a custom setup-owned model layout (`models/skintokens-process-extension/tokenrig`) and also needs the Qwen config snapshot, so Modly's generic node download button would put files in the wrong owner path and would not represent setup readiness. Public model sources remain documented in manifest metadata and `asset_requirements` instead.
-
-The runtime then runs upstream SkinTokens with `cwd` set to the Modly model root and `PYTHONPATH` pointing at the vendored source snapshot. This preserves upstream relative paths while keeping model assets in Modly's model storage.
-
-When setup records `bpy_provider.kind = "external-blender"`, runtime starts `bpy_server.py` with:
-
-```text
-blender --background --factory-startup --python bpy_server.py
-```
-
-and extends `PYTHONPATH` with the vendored SkinTokens source plus extension venv site-packages. This is a fallback path for platforms where PyPI does not provide a compatible `bpy` wheel.
-
-### Local flash-attn wheel flow
-
-On platforms where `flash-attn` has no compatible binary wheel, build it once into the extension-local wheelhouse and then rerun setup:
+On Windows `cp311/win_amd64`, setup can download and verify a managed `flash-attn` wheel for the PyTorch `2.7/cu128` lane. On platforms without a compatible `flash-attn` binary, build a local wheel into the extension wheelhouse and rerun setup:
 
 ```bash
-python3 setup.py --build-flash-attn-wheel --max-build-jobs 2 '{"python_exe":"/usr/bin/python3","ext_dir":"/home/drhepa/Documentos/Modly/extensions/skintokens-process-extension"}'
-python3 setup.py '{"python_exe":"/usr/bin/python3","ext_dir":"/home/drhepa/Documentos/Modly/extensions/skintokens-process-extension"}'
+python3 setup.py --build-flash-attn-wheel --max-build-jobs 2 '{"python_exe":"/usr/bin/python3","ext_dir":"/path/to/Modly/extensions/skintokens-process-extension"}'
+python3 setup.py '{"python_exe":"/usr/bin/python3","ext_dir":"/path/to/Modly/extensions/skintokens-process-extension"}'
 ```
 
-The wheel build writes to:
+Normal setup then installs from:
 
 ```text
 extensions/skintokens-process-extension/.skintokens-runtime/wheelhouse/flash-attn/
 ```
 
-Normal setup then installs from that local wheelhouse using `--no-index --find-links`. If you explicitly want the old source-build behavior during setup, pass `--allow-flash-attn-source-build` or set `MODLY_SKINTOKENS_ALLOW_FLASH_ATTN_SOURCE_BUILD=1`, but this is not recommended for end-user installs.
+Source-building `flash-attn` during normal setup is disabled by default to avoid unbounded end-user installs. If you explicitly want the old source-build behavior, pass `--allow-flash-attn-source-build` or set `MODLY_SKINTOKENS_ALLOW_FLASH_ATTN_SOURCE_BUILD=1`.
 
-## Future Modly rigged-asset service
+## Runtime contract
 
-SkinTokens' upstream `bpy_server.py` is mostly a mesh/rig bridge:
+- Extension id: `skintokens-process-extension`
+- Node id: `rig-mesh`
+- Node name: `Rig Mesh with SkinTokens`
+- Input: mesh file path (`.obj`, `.fbx`, `.glb`, `.gltf`)
+- Output: rigged `.glb`
+- Canonical Modly output path: `workspaceDir/Workflows/<input-stem>_skintokens.glb`
+- Fallback output path when `workspaceDir` is missing: extension runtime run directory
 
-- `/load` imports OBJ/FBX/GLB and extracts vertices, faces, armatures, joints, transforms, skin weights, and optional animation matrices into a SkinTokens `Asset`.
-- `/export` converts a SkinTokens `Asset` into meshes, armature, vertex groups/skin weights, and GLB/FBX output.
-- `/transfer` reloads the original mesh, estimates a similarity transform, transfers predicted skeleton/skin to the original geometry, then exports.
+The processor reads one JSON object line on stdin and emits one JSON object per stdout line. Modly-visible event types are stable:
 
-Long term, Modly should own this as a reusable rigged-asset capability instead of every extension carrying a Blender bridge:
-
-```text
-rigged-mesh/import
-rigged-mesh/export
-rigged-mesh/transfer-skin
+```jsonl
+{"type":"progress","percent":5,"label":"Validating mesh input","stage":"validate-input"}
+{"type":"log","message":"SkinTokens runtime assets are ready","stage":"readiness"}
+{"type":"done","result":{"filePath":"/path/to/workspace/Workflows/model_skintokens.glb"}}
 ```
 
-That future service would benefit SkinTokens, UniRig, animation/retargeting workflows, and any tool that needs rigged GLB output without depending on `bpy_server.py`.
+Errors are also JSONL:
 
-## Tests
+```jsonl
+{"type":"error","message":"SkinTokens requires an NVIDIA Ampere / RTX 30-series or newer GPU...","code":"gpu-too-old","stage":"gpu-preflight"}
+```
 
-Run lightweight tests only:
+Runtime progress/error stages:
+
+1. `validate-input`
+2. `gpu-preflight`
+3. `readiness`
+4. `bpy-server`
+5. `load-model`
+6. `prepare-mesh`
+7. `encode-mesh`
+8. `generate-tokens`
+9. `decode-skin`
+10. `postprocess`
+11. `export-glb`
+12. `validate-output`
+
+Public parameters:
+
+| Parameter | Default | Purpose |
+| --- | ---: | --- |
+| `top_k` | `5` | Top-k sampling for TokenRig autoregressive generation. |
+| `top_p` | `0.95` | Nucleus sampling threshold. |
+| `temperature` | `1.0` | Sampling temperature. |
+| `repetition_penalty` | `2.0` | Penalty for repeated output tokens. |
+| `num_beams` | `10` | Beam count used by upstream generation. |
+| `use_skeleton` | `false` | When true, SkinTokens skins an input mesh that already includes a skeleton. |
+| `use_transfer` | `true` | Uses upstream transfer export path to preserve texture and scale when possible. |
+
+Voxel skin postprocess remains an upstream experimental path and is intentionally **not exposed** in the public Modly manifest until an `open3d`-compatible platform lane is validated. If a legacy/manual payload still sends `use_postprocess=true`, runtime checks `open3d` before loading models and fails early with `open3d-unavailable` when the dependency is missing.
+
+## Support posture
+
+This repository is public, but support claims remain evidence-based. A successful setup on one machine does not mean blanket support for every OS/GPU/Python combination.
+
+| Host / capability | Status |
+| --- | --- |
+| NVIDIA Ampere / RTX 30-series or newer | Required for the current FlashAttention-based runtime. |
+| RTX 20-series, GTX, or older NVIDIA GPUs | Unsupported; expected failure code is `gpu-too-old`. |
+| Windows x86_64 / Python cp311 / PyTorch cu128 | Managed `flash-attn` wheel lane exists; real generation still requires a compatible Ampere+ CUDA host. |
+| Linux ARM64 / Python cp312 / PyTorch cu128 | Maintainer development lane; may require a local `flash-attn` wheel in the extension wheelhouse. |
+| Other hosts | Unvalidated until setup and real generation evidence exists. |
+
+Keep these claims conservative. Do not mark a platform as supported until setup, model readiness, SkinTokens inference, GLB export, and Modly workspace retrieval have all been validated on that platform.
+
+## Troubleshooting
+
+- `gpu-too-old`: the GPU is below Ampere (`sm_80`). This is an upstream FlashAttention/runtime requirement, not a broken install. Use an RTX 30-series/Ampere-or-newer GPU.
+- `cuda-unavailable`: PyTorch cannot see CUDA. Check NVIDIA driver, CUDA runtime, and the PyTorch lane installed in the extension venv.
+- `flash-attn-wheel-unavailable`: no compatible binary wheel was found. Build a local wheel into `.skintokens-runtime/wheelhouse/flash-attn/` or use a validated platform lane.
+- `bpy` install warning on Windows: setup tolerates the known PyPI metadata warning only when the import probe succeeds. If import fails, install/provide a compatible Blender executable.
+- `open3d-unavailable`: a legacy/manual payload requested voxel skin postprocess, but `open3d` is not installed for this platform. The public Modly node no longer exposes this option. The base rigging path does not require voxel postprocess.
+- Missing model/config files: rerun Modly setup/repair. SkinTokens assets are setup-owned and live under `models/skintokens-process-extension/tokenrig/`.
+- No node-level **Download** button: expected. This extension does not use Modly's generic downloader because SkinTokens needs a custom asset layout.
+
+## Development checks
+
+Dry-run setup without installs/downloads:
 
 ```bash
-python -m unittest discover -s tests
+python3 setup.py --dry-run
 ```
 
-The tests do not install dependencies, download model assets, import torch, import SkinTokens, or use GPU.
+Run lightweight tests:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+The tests do not install dependencies, download model assets, import SkinTokens, import torch, or use a GPU.
+
+## Upstream and licensing notes
+
+This repository is a Modly integration wrapper around upstream SkinTokens. SkinTokens, TokenRig, PyTorch, Blender, Hugging Face-hosted assets, Qwen config files, and all third-party dependencies are governed by their own upstream licenses and terms.
+
+Model weights are downloaded at setup time and are not redistributed in this repository.

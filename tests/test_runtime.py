@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from skintokens_ext.runtime import FakeBackend, PipelineError, _runtime_gpu_requirement_guard, normalize_params, run_pipeline
+from skintokens_ext.runtime import FakeBackend, PipelineError, _postprocess_dependency_guard, _runtime_gpu_requirement_guard, normalize_params, run_pipeline
 from tests.helpers import write_minimal_glb
 
 
@@ -77,6 +77,13 @@ class RuntimeTests(unittest.TestCase):
         )
         with mock.patch.dict("sys.modules", {"torch": fake_torch}):
             _runtime_gpu_requirement_guard()
+
+    def test_postprocess_guard_rejects_missing_open3d(self) -> None:
+        with mock.patch("importlib.import_module", side_effect=ModuleNotFoundError("No module named open3d")):
+            with self.assertRaises(PipelineError) as raised:
+                _postprocess_dependency_guard()
+        self.assertEqual(raised.exception.code, "open3d-unavailable")
+        self.assertEqual(raised.exception.stage, "postprocess")
 
 
 if __name__ == "__main__":

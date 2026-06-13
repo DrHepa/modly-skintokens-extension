@@ -161,17 +161,6 @@
             { "value": "true", "label": "Yes" }
           ],
           "tooltip": "Uses upstream transfer export path to preserve texture and scale when possible."
-        },
-        {
-          "id": "use_postprocess",
-          "label": "Voxel Skin Postprocess",
-          "type": "select",
-          "default": "false",
-          "options": [
-            { "value": "false", "label": "No" },
-            { "value": "true", "label": "Yes" }
-          ],
-          "tooltip": "Applies upstream voxel-based skin postprocess. Slower and experimental."
         }
       ]
     }

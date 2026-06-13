@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import os
 import shutil
@@ -131,6 +132,8 @@ def run_pipeline(
         if not readiness.ready:
             raise PipelineError(readiness.public_message(), code="not-ready", stage="readiness")
         log("SkinTokens runtime assets are ready", "readiness")
+        if parsed.use_postprocess:
+            _postprocess_dependency_guard()
 
     produced = backend.run(mesh_path=mesh, output_path=output_path, params=parsed, progress=progress, log=log)
     progress(98, "Validating generated GLB", "validate-output")
@@ -181,6 +184,19 @@ def _runtime_gpu_requirement_guard() -> None:
             code="gpu-too-old",
             stage="gpu-preflight",
         )
+
+
+def _postprocess_dependency_guard() -> None:
+    try:
+        importlib.import_module("open3d")
+    except Exception as exc:
+        raise PipelineError(
+            "Voxel Skin Postprocess requires open3d, but open3d is not available in this extension venv. "
+            "This option is not exposed in the public Modly manifest until an open3d-compatible lane is validated. "
+            "Disable Voxel Skin Postprocess or install a platform-compatible open3d build.",
+            code="open3d-unavailable",
+            stage="postprocess",
+        ) from exc
 
 
 class FakeBackend:
@@ -315,14 +331,7 @@ class SkinTokensBackend:
 
                 if params.use_postprocess:
                     progress(82, "Applying optional voxel skin postprocess", "postprocess")
-                    try:
-                        import open3d  # noqa: F401
-                    except Exception as exc:
-                        raise PipelineError(
-                            "Voxel Skin Postprocess requires open3d, but open3d is not available in this extension venv. Disable Voxel Skin Postprocess or install a platform-compatible open3d build.",
-                            code="open3d-unavailable",
-                            stage="postprocess",
-                        ) from exc
+                    _postprocess_dependency_guard()
                     voxel = asset.voxel(resolution=196)
                     asset.skin *= voxel_skin(
                         grid=0,

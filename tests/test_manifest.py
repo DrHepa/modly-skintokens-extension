@@ -29,9 +29,10 @@ class ManifestTests(unittest.TestCase):
     def test_boolean_params_are_selects(self) -> None:
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
         params = {item["id"]: item for item in manifest["nodes"][0]["params_schema"]}
-        for key in ["use_skeleton", "use_transfer", "use_postprocess"]:
+        for key in ["use_skeleton", "use_transfer"]:
             self.assertEqual(params[key]["type"], "select")
             self.assertIn(params[key]["default"], {"true", "false"})
+        self.assertNotIn("use_postprocess", params)
 
     def test_asset_requirements_use_modly_models_root(self) -> None:
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
